@@ -37,7 +37,9 @@ executable funblog
                        Web.Utils
                        Web.Views.Home
                        Web.Views.Site
+                       Iglu.Core
                        Snowplow.Tracker
+                       Snowplow.Event
   build-depends:
                        Spock >=0.11,
                        Spock-digestive >=0.3,
@@ -46,6 +48,8 @@ executable funblog
                        transformers,
                        http-conduit >= 2.1.8,
                        BoundedChan,
+                       scientific,
+                       vector,
                        base >= 4 && < 5,
                        base16-bytestring >=0.1,
                        blaze-bootstrap >=0.1,

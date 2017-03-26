@@ -67,8 +67,7 @@ runBlog bcfg =
     do pool <- runNoLoggingT $ createSqlitePool (bcfg_db bcfg) 5
        runNoLoggingT $ runSqlPool (runMigration migrateCore) pool
        trackerChannel <- newBoundedChan 10 
-       let tracker = Tracker "http://yandex.ru" trackerChannel
-       createEmitter tracker
+       tracker <- createTracker True Nothing 10 "http://macbook-pro-anton-3.local:8888"
        spockCfg <- defaultSpockCfg Nothing (PCPool pool) (BlogState bcfg tracker)
        runSpock (bcfg_port bcfg) $ spock spockCfg blogApp
 
@@ -83,7 +82,7 @@ mkSite content =
                , sv_user = fmap snd mUser
                }
            snplw = tracker blogSt
-       liftIO $ trackPageView snplw "http://somepage" "sometitle"
+       liftIO $ trackPageView snplw "http://somepage" "sometitle" []
        blaze $ siteView sv (content sv)
 
 mkSite' :: Html -> BlogAction ctx a

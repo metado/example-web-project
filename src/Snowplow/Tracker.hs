@@ -1,186 +1,94 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Snowplow.Tracker
-    ( Tracker (..)
-    , SnowplowEvent (..)
+    ( Tracker
     , trackPageView
-    , eventToUrl
-    , emptyEvent
-    , createEmitter
-    , eventToRequest
-    , Tracker
+    , createTracker
     ) where
 
+import Data.ByteString
+import Data.Maybe (fromMaybe)
+
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Text as T
-
 import qualified Data.HashMap.Strict as HS
-
 
 import Control.Monad.Trans.Resource
 import Network.HTTP.Conduit
+import Network.HTTP.Types.Status
 
-import Control.Monad (void, forever)
+import Control.Monad (forever, when)
 import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Control.Concurrent hiding (readChan, writeChan)
 import Control.Concurrent.BoundedChan
-import Data.Aeson
 
--- import Data.IORef
--- import System.IO.Unsafe
+import Iglu.Core
+import Snowplow.Event
 
--- Iglu
-
-data SchemaVer = SchemaVer { 
-  model :: Int,
-  revision :: Int,
-  addition :: Int
-} deriving (Show, Eq)
-
-instance ToJSON SchemaVer where
-  toJSON v = String $ T.pack $ show $ model v
-
-
-data SchemaRef = SchemaRef {
-  vendor :: String,
-  name :: String,
-  format :: String,
-  version :: SchemaVer
-} deriving (Show, Eq)
-
-instance ToJSON SchemaRef where
-  toJSON v = undefined
-
-
-data SelfDescribingJson = SelfDescribingJson {
-  schema :: SchemaRef,
-  jsonData :: Value
-} deriving (Show, Eq)
-
-
-instance ToJSON SelfDescribingJson where
-  toJSON v = undefined
-
--- Snowplow
 
 type Context = SelfDescribingJson
+
 type SelfDescribingEvent = SelfDescribingJson
 
 
--- Technically, queue is very separate entity
-
 data Tracker = Tracker {
-  collectorUri :: String,
-  queue :: BoundedChan SnowplowEvent
+  encodeContexts :: Bool,
+  collectorUri   :: String,
+  manager        :: Manager,
+  queue          :: BoundedChan SnowplowEvent,
+  emitterThread  :: ThreadId
 }
 
-
--- We should have an emitter, who is responsible for 
--- queing event queue and doing actual sending
-
-
-data SnowplowEvent = SnowplowEvent {
-  trackerVersion :: Maybe String,
-  encodedContexts :: Maybe [Context],
-  url :: Maybe String,
-  pageTitle :: Maybe String,
-  deviceCreatedTimestamp :: Maybe String
-} deriving (Show, Eq)
-
-instance ToJSON SnowplowEvent where
-  toJSON e = object [
-    "tv"   .= trackerVersion e,
-    "url"  .= url e,
-    "cx"   .= encodedContexts e,
-    "page" .= pageTitle e,
-    "dtm"  .= deviceCreatedTimestamp e]
-
-
-emptyEvent :: SnowplowEvent
-emptyEvent = SnowplowEvent { 
-  trackerVersion  = Just "haskell-0.1.0.0",
-  encodedContexts = Nothing,
-  url = Nothing,
-  pageTitle = Nothing,
-  deviceCreatedTimestamp = Nothing
-}
-
-createEmitter :: Tracker -> IO ()
-createEmitter tracker = void $ forkIO $ forever pull
+createEmitter :: Manager -> BoundedChan SnowplowEvent -> T.Text -> IO ThreadId
+createEmitter manager queue collectorUri = forkIO $ forever pull
   where pull = do
-          event <- readChan $ queue tracker 
-          let req = eventToRequest (T.pack $ collectorUri tracker) event
-          print req
+          event <- readChan queue
+          stm   <- getTimestamp
+          let request = eventToRequest collectorUri $ event { deviceSentTimestamp = Just stm }
+          retry <- case request of 
+            Nothing -> return False
+            Just r  -> fmap shouldRetry $ send manager r
+          when retry $ writeChan queue event
 
--- foo :: IO ()
--- foo = do
---   request <- parseUrl "http://google.com/"
---   manager <- newManager tlsManagerSettings
---   runResourceT $ do
---       resource <- http request manager
---       r <- withIO alloc 3
---       fmap void r
+createTracker :: Bool -> Maybe ManagerSettings -> Int -> String -> IO Tracker
+createTracker encodeContexts managerSettings queueCapacity collectorUri = do
+  trackerChannel <- newBoundedChan queueCapacity
+  manager        <- newManager $ fromMaybe tlsManagerSettings managerSettings
+  emitterThread  <- createEmitter manager trackerChannel $ T.pack collectorUri
+  return $ Tracker encodeContexts collectorUri manager trackerChannel emitterThread
 
+send :: Manager -> Request -> IO Status
+send manager request = runResourceT $ do
+  response <- http request manager
+  return $ responseStatus response 
 
--- alloc :: IO ()
--- alloc = print "hello"
--- 
--- rele :: a -> IO ()
--- rele _ = return ()
+shouldRetry :: Status -> Bool
+shouldRetry status = status == status200
 
+eventToRequest :: T.Text -> SnowplowEvent -> Maybe Request -- should be MonadThrow
+eventToRequest collectorEndpoint event = fmap setQuery initialUrl
+  where fullUrl    = T.concat [collectorEndpoint, T.pack "/i?"]
+        initialUrl = parseUrl $ T.unpack fullUrl 
+        setQuery   = setQueryString (eventToUrl event)
 
--- runResourceT allocates
+track :: Tracker -> SnowplowEvent -> IO ()
+track (Tracker encode curl _ queue _) event = do
+  dtm <- getTimestamp
+  let timestampedEvent = event { deviceCreatedTimestamp = Just dtm }
+  let eventWithContexts = normalizeContexts encode timestampedEvent
+  writeChan queue eventWithContexts
 
-eventToRequest :: T.Text -> SnowplowEvent -> Maybe Request
-eventToRequest collectorEndpoint event = parseUrl $ T.unpack fullUrl
-  where fullUrl = T.concat [collectorEndpoint, T.pack "?", eventToUrl event]
-
-
-eventToUrl :: SnowplowEvent -> T.Text
-eventToUrl e = urlizePayload $ normalizeGetPayload $ removeNulls $ toJSON e
-
-trackPageView :: Tracker -> String -> String -> IO ()
-trackPageView (Tracker curl q) url page = writeChan q $ pageView url page
+trackPageView :: Tracker -> String -> String -> [Context] -> IO ()
+trackPageView tracker url page contexts = track tracker $ pageView url page contexts
 
 -- Should not be exposed to user-space as doesn't set timestamp
-pageView :: String -> String -> SnowplowEvent
-pageView url page = emptyEvent { url = Just url, pageTitle = Just page }
-
-pageView' :: String -> String -> IO SnowplowEvent
-pageView' url page = do
-  dtm <- getDtm
-  return (pageView url page) { deviceCreatedTimestamp = Just dtm }
-
+pageView :: String -> String -> [Context] -> SnowplowEvent
+pageView url page contexts = emptyEvent { eventType = PageView, url = Just url, pageTitle = Just page, contexts = contexts }
 
 trackSelfDescribingEvent :: SelfDescribingEvent -> [Context] -> IO ()
 trackSelfDescribingEvent event contexts = undefined
 
--- It'll send event once, we need it constantly pulling
-emit :: Tracker -> IO ()
-emit tracker = do
-  event <- readChan $ queue tracker 
-  return ()
+getTimestamp :: IO Integer
+getTimestamp = round `fmap` getPOSIXTime
 
-removeNulls :: Value -> HS.HashMap T.Text Value
-removeNulls json = case json of
-  Object hm -> filterNulls hm
-  _ -> HS.fromList []
-  where filterNulls m = HS.filterWithKey predicate m
-        predicate _ v = case v of
-            Null -> False
-            _ -> True
-
-normalizeGetPayload :: HS.HashMap T.Text Value -> HS.HashMap T.Text T.Text
-normalizeGetPayload payload = HS.map encode payload
-  where encode v = case v of
-            String s -> s
-            o -> encode o
-  
-urlizePayload :: HS.HashMap T.Text T.Text -> T.Text
-urlizePayload hm = T.intercalate (T.pack "&") (fmap join $ HS.toList hm) 
-  where join pair = case pair of
-            (k, v) -> T.concat [k, T.pack "=", v]
-
-
-getDtm :: IO String
-getDtm = return "my-dtm"
