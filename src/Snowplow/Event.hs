@@ -9,9 +9,13 @@ module Snowplow.Event
     ) where
 
 import Data.ByteString
+import qualified Data.ByteString.Base64.Lazy as BL
+import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
+import qualified Data.Text.Lazy.Encoding as LE
 import qualified Data.HashMap.Strict as HS
 
+import Data.UUID
 import Data.Text.Encoding
 import Data.Vector hiding ((++))
 import Data.Scientific (coefficient)
@@ -34,6 +38,7 @@ instance ToJSON EventType where
 -- Data structure representing all available fields accroding to Snowplow Tracker Protocol
 data SnowplowEvent = SnowplowEvent {
   eventType              :: EventType,
+  eventId                :: UUID,
   trackerVersion         :: Maybe String,
   contexts               :: [Context],
   encodedContexts        :: [Context],
@@ -48,18 +53,19 @@ data SnowplowEvent = SnowplowEvent {
 instance ToJSON SnowplowEvent where
   toJSON e = object [
     "e"    .= eventType e,
+    "eid"  .= toString (eventId e),
     "tv"   .= trackerVersion e,
     "co"   .= nonEmpty (contexts e),
-    "cx"   .= base64encode (encodedContexts e),    -- I want to make it list
+    "cx"   .= (fmap LE.decodeUtf8 (base64encode (encodedContexts e))),    -- I want to make it list
     "url"  .= url e,
     "page" .= pageTitle e,
     "dtm"  .= deviceCreatedTimestamp e,
     "stm"  .= deviceSentTimestamp e
     ]
 
-base64encode :: [Context] -> Maybe T.Text -- TODO: this should transform into base64
+base64encode :: [Context] -> Maybe L.ByteString -- TODO: this should transform into base64
 base64encode [] = Nothing
-base64encode contexts = Just $ T.pack $ show $ Array $ fromList $ fmap toJSON contexts
+base64encode contexts = Just $ BL.encode $ encode $ wrapContexts contexts
 
 nonEmpty :: [a] -> Maybe [a]
 nonEmpty [] = Nothing
@@ -78,6 +84,20 @@ emptyEvent = SnowplowEvent {
 
 eventToUrl :: SnowplowEvent -> [(ByteString, Maybe ByteString)]
 eventToUrl = urlizePayload . normalizeGetPayload . cleanup . toJSON
+
+contextSchema :: SchemaRef
+contextSchema = SchemaRef {
+  vendor = "com.snowplowanalytics.snowplow",
+  name = "contexts",
+  format = "jsonschema",
+  version = SchemaVer { model = 1, revision = 0, addition = 1 }
+}
+
+wrapContexts :: [Context] -> Context
+wrapContexts contexts = SelfDescribingJson {
+  schema = contextSchema,
+  jsonData = Array $ fmap toJSON $ fromList contexts
+}
 
 normalizeContexts :: Bool -> SnowplowEvent -> SnowplowEvent
 normalizeContexts encode event = 

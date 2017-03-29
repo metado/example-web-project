@@ -50,6 +50,8 @@ executable funblog
                        BoundedChan,
                        scientific,
                        vector,
+                       uuid,
+                       base64-bytestring,
                        base >= 4 && < 5,
                        base16-bytestring >=0.1,
                        blaze-bootstrap >=0.1,

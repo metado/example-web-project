@@ -17,7 +17,7 @@ import Web.Views.Home
 import Web.Views.Site
 
 import Snowplow.Tracker
-import Control.Concurrent.BoundedChan
+import Iglu.Core
 
 import Control.Monad
 import Control.Monad.Logger
@@ -35,9 +35,26 @@ import qualified Data.Configurator as C
 import qualified Data.Text as T
 import qualified Network.HTTP.Types.Status as Http
 
+import Data.Aeson (Value (..), object)
+
 type SessionVal = Maybe SessionId
 type BlogApp ctx = SpockCtxM ctx SqlBackend SessionVal BlogState ()
 type BlogAction ctx a = SpockActionCtx ctx SqlBackend SessionVal BlogState a
+
+myContext :: SelfDescribingJson
+myContext = SelfDescribingJson {
+  schema = SchemaRef {
+    vendor = "com.snowplowanalytics.snowplow",
+    name = "geolocation_context",
+    format = "jsonschema",
+    version = SchemaVer { model = 1, revision = 1, addition = 0 }
+  },
+
+  jsonData = object [
+    ("latitude", Number 32),
+    ("longitude", Number 23)
+  ]
+}
 
 data BlogState
    = BlogState
@@ -66,8 +83,7 @@ runBlog :: BlogCfg -> IO ()
 runBlog bcfg =
     do pool <- runNoLoggingT $ createSqlitePool (bcfg_db bcfg) 5
        runNoLoggingT $ runSqlPool (runMigration migrateCore) pool
-       trackerChannel <- newBoundedChan 10 
-       tracker <- createTracker True Nothing 10 "http://macbook-pro-anton-3.local:8888"
+       tracker <- createTracker True Nothing 10 "http://34.205.69.64:8080"
        spockCfg <- defaultSpockCfg Nothing (PCPool pool) (BlogState bcfg tracker)
        runSpock (bcfg_port bcfg) $ spock spockCfg blogApp
 
@@ -82,7 +98,7 @@ mkSite content =
                , sv_user = fmap snd mUser
                }
            snplw = tracker blogSt
-       liftIO $ trackPageView snplw "http://somepage" "sometitle" []
+       liftIO $ trackPageView snplw "http://somepage" "sometitle" [myContext]
        blaze $ siteView sv (content sv)
 
 mkSite' :: Html -> BlogAction ctx a

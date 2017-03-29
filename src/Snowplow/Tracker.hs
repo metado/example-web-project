@@ -6,26 +6,23 @@ module Snowplow.Tracker
     , createTracker
     ) where
 
-import Data.ByteString
-import Data.Maybe (fromMaybe)
-
-import Data.Time.Clock.POSIX (getPOSIXTime)
+import           Data.Maybe (fromMaybe)
+import           Data.Ratio (numerator)
+import           Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Text as T
-import qualified Data.HashMap.Strict as HS
+import           Control.Monad (forever, when)
+import           Control.Monad.Trans
+import           Control.Monad.Trans.Resource
+import           Control.Concurrent hiding (readChan, writeChan)
+import           Control.Concurrent.BoundedChan
+import           Network.HTTP.Conduit
+import           Network.HTTP.Types.Status
 
-import Control.Monad.Trans.Resource
-import Network.HTTP.Conduit
-import Network.HTTP.Types.Status
+import           Iglu.Core
+import           Snowplow.Event
 
-import Control.Monad (forever, when)
-import Control.Monad.Catch
-import Control.Monad.IO.Class
-import Control.Concurrent hiding (readChan, writeChan)
-import Control.Concurrent.BoundedChan
-
-import Iglu.Core
-import Snowplow.Event
-
+import Data.UUID
+import System.Random
 
 type Context = SelfDescribingJson
 
@@ -61,10 +58,11 @@ createTracker encodeContexts managerSettings queueCapacity collectorUri = do
 send :: Manager -> Request -> IO Status
 send manager request = runResourceT $ do
   response <- http request manager
+  liftIO $ print request
   return $ responseStatus response 
 
 shouldRetry :: Status -> Bool
-shouldRetry status = status == status200
+shouldRetry status = status /= status200
 
 eventToRequest :: T.Text -> SnowplowEvent -> Maybe Request -- should be MonadThrow
 eventToRequest collectorEndpoint event = fmap setQuery initialUrl
@@ -72,10 +70,14 @@ eventToRequest collectorEndpoint event = fmap setQuery initialUrl
         initialUrl = parseUrl $ T.unpack fullUrl 
         setQuery   = setQueryString (eventToUrl event)
 
+eventsToPostRequest :: T.Text -> [SnowplowEvent] -> Maybe Request 
+eventsToPostRequest collectorEndpoint events = undefined
+
 track :: Tracker -> SnowplowEvent -> IO ()
 track (Tracker encode curl _ queue _) event = do
   dtm <- getTimestamp
-  let timestampedEvent = event { deviceCreatedTimestamp = Just dtm }
+  eid <- randomIO :: IO UUID
+  let timestampedEvent = event { deviceCreatedTimestamp = Just dtm, eventId = eid }
   let eventWithContexts = normalizeContexts encode timestampedEvent
   writeChan queue eventWithContexts
 
@@ -84,11 +86,16 @@ trackPageView tracker url page contexts = track tracker $ pageView url page cont
 
 -- Should not be exposed to user-space as doesn't set timestamp
 pageView :: String -> String -> [Context] -> SnowplowEvent
-pageView url page contexts = emptyEvent { eventType = PageView, url = Just url, pageTitle = Just page, contexts = contexts }
+pageView url page contexts = emptyEvent { 
+  eventType = PageView, 
+  url = Just url, 
+  pageTitle = Just page, 
+  contexts = contexts }
 
 trackSelfDescribingEvent :: SelfDescribingEvent -> [Context] -> IO ()
 trackSelfDescribingEvent event contexts = undefined
 
+-- Get timestamp in milliseconds
 getTimestamp :: IO Integer
-getTimestamp = round `fmap` getPOSIXTime
+getTimestamp = (`div` 1000) . numerator .  toRational . (* 1000000) <$> getPOSIXTime
 

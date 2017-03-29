@@ -6,7 +6,6 @@ module Iglu.Core
   , SelfDescribingJson (..)
   ) where
 
-import Prelude hiding (append)
 import Data.Text
 import qualified Data.HashMap.Strict as HS
 
@@ -33,7 +32,7 @@ data SchemaRef = SchemaRef {
 } deriving (Show, Eq)
 
 schemaRefToPath :: SchemaRef -> Text
-schemaRefToPath ref = pack (vendor ref) `append` "/" `append` pack (vendor ref) `append` pack (vendor ref)
+schemaRefToPath ref = pack (vendor ref) `append` "/" `append` pack (name ref) `append` "/" `append` pack (format ref) `append` "/" `append` schemaVerToString (version ref)
 
 schemaRefToUri :: SchemaRef -> Text
 schemaRefToUri ref = "iglu:" `append` schemaRefToPath ref
